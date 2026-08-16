@@ -1,118 +1,308 @@
-import sounddevice as sd
 import config
-
-from effects import normal, robot, tremolo, low_voice, high_voice, noise_gate, gain, limiter
+import sounddevice as sd
+import numpy as np
+import threading
+import os
+import signal
 import sys
-import tty
-import termios
+from evdev import InputDevice, ecodes
+
+from effects import (
+    normal,
+    robot,
+    tremolo,
+    low_voice,
+    high_voice,
+    noise_gate,
+    limiter,
+)
+
+
+# ============================================================
+# 設定
+# ============================================================
+
+# PulseAudio
+AUDIO_DEVICE = "default"
+
+# キーボード
+KEYBOARD_DEVICE = "/dev/input/by-id/usb-_mini_keyboard-event-kbd"
+
+
+# ============================================================
+# モード
+# ============================================================
 
 mode = "normal"
 
-INPUT_DEVICE = 2
-OUTPUT_DEVICE = 1
+mode_lock = threading.Lock()
+
+running = True
 
 
-def callback(indata, outdata, frames, time, status):
+# ============================================================
+# モード変更
+# ============================================================
+
+def set_mode(new_mode):
 
     global mode
 
-    if status:
-        print(status)
+    with mode_lock:
+        mode = new_mode
 
-    clean = noise_gate(indata)
-    # clean = indata
-    clean = clean * 0.7
+    print("Mode changed:", new_mode, flush=True)
 
-    if mode == "normal":
-        effect = normal(clean)
 
-    elif mode == "robot":
-        effect = robot(clean)
+def get_mode():
 
-    elif mode == "tremolo":
-        effect = tremolo(clean)
+    with mode_lock:
+        return mode
 
-    elif mode == "low":
-        effect = low_voice(clean)
-    
-    elif mode == "high":
-        effect = high_voice(clean)
 
-    outdata[:] = limiter(effect) 
+# ============================================================
+# キーボード
+# ============================================================
+
+def keyboard_worker():
+
+    global running
+
+    try:
+
+        keyboard = InputDevice(KEYBOARD_DEVICE)
+
+        print(
+            "Keyboard:",
+            KEYBOARD_DEVICE,
+            flush=True
+        )
+
+        print(
+            "Keyboard input ready.",
+            flush=True
+        )
+
+        for event in keyboard.read_loop():
+
+            if not running:
+                break
+
+            if event.type != ecodes.EV_KEY:
+                continue
+
+            # value:
+            # 0 = release
+            # 1 = press
+            # 2 = repeat
+            if event.value != 1:
+                continue
+
+            if event.code == ecodes.KEY_1:
+
+                set_mode("normal")
+
+            elif event.code == ecodes.KEY_2:
+
+                set_mode("robot")
+
+            elif event.code == ecodes.KEY_3:
+
+                set_mode("tremolo")
+
+            elif event.code == ecodes.KEY_4:
+
+                set_mode("low")
+
+            elif event.code == ecodes.KEY_5:
+
+                set_mode("high")
+
+    except Exception as e:
+
+        print(
+            "Keyboard error:",
+            repr(e),
+            flush=True
+        )
+
+
+# ============================================================
+# 終了処理
+# ============================================================
+
+def signal_handler(signum, frame):
+
+    global running
+
+    print(
+        "\nStopping...",
+        flush=True
+    )
+
+    running = False
+
+
+signal.signal(
+    signal.SIGINT,
+    signal_handler
+)
+
+signal.signal(
+    signal.SIGTERM,
+    signal_handler
+)
+
+
+# ============================================================
+# メイン
+# ============================================================
 
 print("1 Normal")
 print("2 Robot")
 print("3 Tremolo")
 print("4 Low Voice")
 print("5 High Voice")
+print()
+
+print(
+    "Audio device:",
+    AUDIO_DEVICE,
+    flush=True
+)
 
 
-def get_key():
+# キーボードスレッド開始
 
-    fd = sys.stdin.fileno()
+keyboard_thread = threading.Thread(
+    target=keyboard_worker,
+    daemon=True
+)
 
-    old_settings = termios.tcgetattr(fd)
+keyboard_thread.start()
 
-    try:
-        tty.setcbreak(fd)   # setrawではなくcbreak
-        key = sys.stdin.read(1)
 
-    finally:
-        termios.tcsetattr(
-            fd,
-            termios.TCSADRAIN,
-            old_settings
+# ============================================================
+# オーディオストリーム
+# ============================================================
+
+try:
+
+    with sd.Stream(
+        samplerate=config.SAMPLE_RATE,
+        device=(AUDIO_DEVICE, AUDIO_DEVICE),
+        channels=1,
+        blocksize=config.BLOCKSIZE,
+        dtype="float32",
+    ) as stream:
+
+        print(
+            "Voice Toy started.",
+            flush=True
         )
 
-    return key
+        while running:
+
+            # ------------------------------------------------
+            # マイク入力
+            # ------------------------------------------------
+
+            audio, overflowed = stream.read(
+                config.BLOCKSIZE
+            )
+
+            if overflowed:
+
+                print(
+                    "Input overflow",
+                    flush=True
+                )
 
 
-def keyboard():
+            # ------------------------------------------------
+            # ノイズゲート
+            # ------------------------------------------------
 
-    global mode
+            clean = noise_gate(audio)
 
-    while True:
-
-        key = get_key()
-
-        if key == "1":
-            mode = "normal"
-            print("\nNormal")
-
-        elif key == "2":
-            mode = "robot"
-            print("\nRobot")
-
-        elif key == "3":
-            mode = "tremolo"
-            print("\nTremolo")
-
-        elif key == "4":
-            mode = "low"
-            print("\nLow Voice")
-
-        elif key == "5":
-            mode = "high"
-            print("\nHigh Voice")
-
-import threading
-
-if sys.stdin.isatty():
-    threading.Thread(
-        target=keyboard,
-        daemon=True
-    ).start()
+            clean = clean * 0.7
 
 
-with sd.Stream(
-    samplerate=config.SAMPLE_RATE,
-    device=(INPUT_DEVICE, OUTPUT_DEVICE),
-    channels=1,
-    blocksize=config.BLOCKSIZE,
-    dtype="float32",
-    callback=callback,
-):
+            # ------------------------------------------------
+            # 現在のモード取得
+            # ------------------------------------------------
+
+            current_mode = get_mode()
 
 
-    while True:
-        sd.sleep(1000)
+            # ------------------------------------------------
+            # エフェクト
+            # ------------------------------------------------
+
+            if current_mode == "normal":
+
+                effect = normal(clean)
+
+            elif current_mode == "robot":
+
+                effect = robot(
+                    clean,
+                    config.SAMPLE_RATE
+                )
+
+            elif current_mode == "tremolo":
+
+                effect = tremolo(
+                    clean,
+                    config.SAMPLE_RATE
+                )
+
+            elif current_mode == "low":
+
+                effect = low_voice(clean)
+
+            elif current_mode == "high":
+
+                effect = high_voice(clean)
+
+            else:
+
+                effect = clean
+
+
+            # ------------------------------------------------
+            # リミッター
+            # ------------------------------------------------
+
+            effect = limiter(effect)
+
+
+            # ------------------------------------------------
+            # スピーカー出力
+            # ------------------------------------------------
+
+            stream.write(effect)
+
+
+except KeyboardInterrupt:
+
+    pass
+
+
+except Exception as e:
+
+    print(
+        "Audio error:",
+        repr(e),
+        flush=True
+    )
+
+
+finally:
+
+    running = False
+
+    print(
+        "Voice Toy stopped.",
+        flush=True
+    )

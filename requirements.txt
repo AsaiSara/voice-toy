@@ -1,0 +1,5 @@
+evdev==1.7.1
+numpy==1.21.6
+scipy==1.7.3
+sounddevice==0.5.5
+soundfile==0.13.1
