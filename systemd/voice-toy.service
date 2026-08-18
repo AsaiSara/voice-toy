@@ -1,0 +1,21 @@
+[Unit]
+Description=Voice Toy
+After=sound.target
+After=pulseaudio.service
+
+[Service]
+User=pi
+
+WorkingDirectory=/home/pi/Desktop/KadoMakers/voice-toy
+
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
+Environment="PULSE_SERVER=unix:/run/user/1000/pulse/native"
+
+ExecStartPre=/bin/sleep 10
+ExecStart=/home/pi/Desktop/KadoMakers/voice-toy/.venv/bin/python /home/pi/Desktop/KadoMakers/voice-toy/main.py
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
